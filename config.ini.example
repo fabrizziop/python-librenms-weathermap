@@ -1,0 +1,45 @@
+# LibreNMS Weathermap Configuration Example
+# Copy this file to config.ini and update with your settings
+
+[librenms]
+# Your LibreNMS instance URL
+url = https://your-librenms-instance.com
+# Your LibreNMS API token (generate in LibreNMS under Settings > API)
+token = your_api_token_here
+
+[devices]
+# Device mappings: short_name = hostname_or_ip
+# Example:
+# router1 = 192.168.1.1
+# switch1 = switch.example.com
+# firewall = 10.0.0.1
+
+[links]
+# Link definitions: linkX = device1:port1 -- device2:port2
+# Example:
+# link1 = router1:eth0 -- switch1:GigabitEthernet0/1
+# link2 = switch1:GigabitEthernet0/2 -- firewall:eth1
+
+[positions]
+# Device positions on the map (automatically managed by editor)
+# Format: device_x and device_y coordinates
+# Example:
+# router1_x = 100
+# router1_y = 100
+
+[settings]
+# Minimum utilization for color scale (Mbit/s)
+min_util = 0
+# Maximum utilization for color scale (Mbit/s)
+max_util = 1000
+# Node size (radius in pixels for visualization)
+node_size = 20
+# Output image width in inches
+fig_width = 16
+# Output image height in inches
+fig_height = 12
+# Output image DPI (dots per inch)
+dpi = 100
+# Node color (matplotlib color name or hex code)
+# Examples: lightblue, lightgreen, #FF5733
+node_color = lightblue
