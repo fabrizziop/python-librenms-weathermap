@@ -60,7 +60,9 @@ class ConfigEditor:
             fill=tk.X
         )
         tk.Button(toolbar, text="Add Device", command=self.add_device).pack(fill=tk.X)
+        tk.Button(toolbar, text="Add Cloud Node", command=self.add_cloud_node).pack(fill=tk.X)
         tk.Button(toolbar, text="Add Link", command=self.add_link).pack(fill=tk.X)
+        tk.Button(toolbar, text="Add Cloud Link", command=self.add_cloud_link).pack(fill=tk.X)
         tk.Button(toolbar, text="Bulk Add", command=self.bulk_add).pack(fill=tk.X)
         tk.Button(
             toolbar, text="Remove Unlinked", command=self.remove_unlinked_devices
@@ -159,6 +161,40 @@ class ConfigEditor:
             )
         except Exception as e:
             messagebox.showerror("Error", f"Failed to fetch devices: {e}")
+
+    def is_cloud_node(self, hostname: str) -> bool:
+        """Check if a hostname represents a cloud/virtual node."""
+        return hostname.startswith("cloud:")
+
+    def add_cloud_node(self) -> None:
+        """Add a cloud/virtual node (unmanaged device like ISP gateway)."""
+        cloud_name = simpledialog.askstring(
+            "Cloud Node Name",
+            "Enter a name for the cloud node (e.g., ISP, Internet, WAN):",
+            initialvalue="ISP"
+        )
+        if not cloud_name:
+            return
+
+        # Sanitize name for use as device key
+        device_key = cloud_name.replace(" ", "_")
+
+        if device_key in self.devices:
+            messagebox.showerror("Error", f"Device {device_key} already exists")
+            return
+
+        x = simpledialog.askinteger(
+            "X Position", "Enter X position:", initialvalue=100
+        )
+        y = simpledialog.askinteger(
+            "Y Position", "Enter Y position:", initialvalue=100
+        )
+
+        if x is not None and y is not None:
+            # Cloud nodes use "cloud:" prefix in hostname
+            self.devices[device_key] = {"x": x, "y": y, "hostname": f"cloud:{cloud_name}"}
+            self.draw_network()
+            messagebox.showinfo("Success", f"Added cloud node '{device_key}'")
 
     def add_device(self) -> None:
         if not self.fetched_devices:
@@ -351,6 +387,132 @@ class ConfigEditor:
         )
         self.draw_network()
 
+    def add_cloud_link(self) -> None:
+        """Add a link between a managed device and a cloud node."""
+        if not self.devices:
+            messagebox.showerror("Error", "Add devices first")  # type: ignore
+            return
+
+        # Separate cloud and managed devices
+        cloud_devices = {
+            key: data for key, data in self.devices.items()
+            if self.is_cloud_node(data["hostname"])
+        }
+        managed_devices = {
+            key: data for key, data in self.devices.items()
+            if not self.is_cloud_node(data["hostname"])
+        }
+
+        if not cloud_devices:
+            messagebox.showerror("Error", "No cloud nodes found. Add a cloud node first.")
+            return
+        if not managed_devices:
+            messagebox.showerror("Error", "No managed devices found. Add a device first.")
+            return
+
+        # Select the managed device first
+        select_win1 = tk.Toplevel(self.root)
+        select_win1.title("Select Managed Device")
+        listbox1 = tk.Listbox(select_win1, height=20, width=50)
+        for key in sorted(managed_devices.keys()):
+            listbox1.insert(tk.END, key)
+        listbox1.pack()
+        managed_dev_var = [None]
+
+        def select_managed():
+            selection = listbox1.curselection()
+            if selection:
+                managed_dev_var[0] = listbox1.get(selection[0])
+            select_win1.destroy()
+
+        tk.Button(select_win1, text="Select", command=select_managed).pack()
+        self.root.wait_window(select_win1)
+        if not managed_dev_var[0]:
+            return
+        managed_key = managed_dev_var[0]
+        managed_hostname = managed_devices[managed_key]["hostname"]
+
+        # Select the cloud node
+        select_win2 = tk.Toplevel(self.root)
+        select_win2.title("Select Cloud Node")
+        listbox2 = tk.Listbox(select_win2, height=20, width=50)
+        for key in sorted(cloud_devices.keys()):
+            listbox2.insert(tk.END, key)
+        listbox2.pack()
+        cloud_dev_var = [None]
+
+        def select_cloud():
+            selection = listbox2.curselection()
+            if selection:
+                cloud_dev_var[0] = listbox2.get(selection[0])
+            select_win2.destroy()
+
+        tk.Button(select_win2, text="Select", command=select_cloud).pack()
+        self.root.wait_window(select_win2)
+        if not cloud_dev_var[0]:
+            return
+        cloud_key = cloud_dev_var[0]
+
+        # Fetch ports for managed device
+        try:
+            url = self.config["librenms"]["url"]
+            token = self.config["librenms"]["token"]
+            headers = {"X-Auth-Token": token}
+            verify_ssl = False if self.insecure_var.get() else "/etc/ssl/certs/ca-certificates.crt"
+            if self.insecure_var.get():
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            r = requests.get(
+                f"{url}/api/v0/devices/{managed_hostname}/ports",
+                headers=headers,
+                params={"columns": "ifName"},
+                verify=verify_ssl,
+            )
+            r.raise_for_status()
+            ports: List[str] = [p["ifName"] for p in r.json()["ports"]]
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to fetch ports for {managed_hostname}: {e}")
+            return
+
+        # Select port on managed device
+        select_win3 = tk.Toplevel(self.root)
+        select_win3.title(f"Select Port on {managed_key}")
+        listbox3 = tk.Listbox(select_win3, height=20, width=50)
+        for port in sorted(ports):
+            listbox3.insert(tk.END, port)
+        listbox3.pack()
+        port_var = [None]
+
+        def select_port():
+            selection = listbox3.curselection()
+            if selection:
+                port_var[0] = listbox3.get(selection[0])
+            select_win3.destroy()
+
+        tk.Button(select_win3, text="Select", command=select_port).pack()
+        self.root.wait_window(select_win3)
+        if not port_var[0]:
+            return
+        managed_port = port_var[0]
+
+        # Ask for virtual port name on cloud side
+        cloud_port = simpledialog.askstring(
+            "Cloud Port Name",
+            f"Enter a name for the virtual port on {cloud_key}:",
+            initialvalue="wan"
+        )
+        if not cloud_port:
+            return
+
+        # Add link (managed device first, cloud second)
+        self.links.append({
+            "dev1": managed_key,
+            "dev2": cloud_key,
+            "port1": managed_port,
+            "port2": cloud_port
+        })
+        self.draw_network()
+        messagebox.showinfo("Success", f"Added link: {managed_key}:{managed_port} -- {cloud_key}:{cloud_port}")
+
     def bulk_add(self) -> None:
         if not self.fetched_devices:
             messagebox.showerror("Error", "Fetch devices first")  # type: ignore
@@ -516,17 +678,20 @@ class ConfigEditor:
 
         node_size = int(self.config["settings"].get("node_size", 20))
         node_color = self.config["settings"].get("node_color", "lightblue")
+        cloud_node_color = self.config["settings"].get("cloud_node_color", "lightgray")
         # In matplotlib, node_size is area (radius^2), so we need to adjust for canvas display
         # Using a scale factor to approximate the visual size
         canvas_radius = node_size / 2.5  # Scale factor to match matplotlib's appearance
         for device_key, data in self.devices.items():
             x, y = data["x"], data["y"]
+            # Use different color for cloud nodes
+            fill_color = cloud_node_color if self.is_cloud_node(data["hostname"]) else node_color
             self.canvas.create_oval(
                 x - canvas_radius,
                 y - canvas_radius,
                 x + canvas_radius,
                 y + canvas_radius,
-                fill=node_color,
+                fill=fill_color,
             )
             self.canvas.create_text(x, y, text=device_key)
 
@@ -748,6 +913,14 @@ class ConfigEditor:
             row=8, column=1
         )
 
+        tk.Label(settings_win, text="Cloud Node Color:").grid(row=9, column=0, sticky="e")
+        cloud_node_color_var = tk.StringVar(
+            value=self.config["settings"].get("cloud_node_color", "lightgray")
+        )
+        tk.Entry(settings_win, textvariable=cloud_node_color_var, width=50).grid(
+            row=9, column=1
+        )
+
         def save():
             self.config["librenms"]["url"] = url_var.get()
             self.config["librenms"]["token"] = token_var.get()
@@ -758,13 +931,14 @@ class ConfigEditor:
             self.config["settings"]["fig_height"] = fig_height_var.get()
             self.config["settings"]["dpi"] = dpi_var.get()
             self.config["settings"]["node_color"] = node_color_var.get()
+            self.config["settings"]["cloud_node_color"] = cloud_node_color_var.get()
             settings_win.destroy()
 
         tk.Button(settings_win, text="Save", command=save).grid(
-            row=9, column=0, pady=10
+            row=10, column=0, pady=10
         )
         tk.Button(settings_win, text="Cancel", command=settings_win.destroy).grid(
-            row=9, column=1, pady=10
+            row=10, column=1, pady=10
         )
 
     def mainloop(self) -> None:

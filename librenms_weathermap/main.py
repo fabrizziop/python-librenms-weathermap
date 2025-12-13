@@ -96,12 +96,20 @@ def main():
     else:
         device_to_hostname = {}
 
-    # Get devices
+    # Helper function to check if a device is a cloud/virtual node
+    def is_cloud_node(hostname: str) -> bool:
+        return hostname.startswith("cloud:")
+
+    # Get devices (skip cloud nodes - they don't exist in LibreNMS)
     verify_ssl = False if args.insecure else "/etc/ssl/certs/ca-certificates.crt"
     if args.insecure:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     devices: Dict[str, Any] = {}
     for _, hostname in device_to_hostname.items():
+        if is_cloud_node(hostname):
+            # Cloud nodes don't need API data - store a placeholder
+            devices[hostname] = {"hostname": hostname, "is_cloud": True}
+            continue
         try:
             r = requests.get(
                 f"{librenms_url}/api/v0/devices/{hostname}", headers=headers, verify=verify_ssl
@@ -112,9 +120,11 @@ def main():
             print(f"Error fetching device {hostname}: {e}")
             continue
 
-    # Get ports for devices
+    # Get ports for devices (skip cloud nodes)
     ports: Dict[str, Any] = {}
     for hostname in devices:
+        if is_cloud_node(hostname):
+            continue
         try:
             r = requests.get(
                 f"{librenms_url}/api/v0/devices/{hostname}/ports",
@@ -132,6 +142,22 @@ def main():
             continue
 
     # Parse links and compute utilization
+    # Utilization helper function defined outside the loop
+    def get_rate(port: Dict[str, Any], direction: str) -> float:
+        """Calculate rate in Mbit/s from port data."""
+        rate_key = f"if{direction}Octets_rate"
+        delta_key = f"if{direction}Octets_delta"
+        if rate_key in port and port[rate_key] is not None:
+            return float(port[rate_key] * 8 / 1e6)
+        elif (
+            delta_key in port
+            and "poll_period" in port
+            and port["poll_period"] > 0
+        ):
+            return float((port[delta_key] * 8 / port["poll_period"]) / 1e6)
+        else:
+            return 0.0
+
     links: List[Dict[str, Any]] = []
     if config.has_section("links"):
         for _, link_str in config["links"].items():
@@ -139,32 +165,55 @@ def main():
                 parts = link_str.split(" -- ")
                 port1_str = parts[0].strip()
                 port2_str = parts[1].strip()
-                device1_key, port1_name = port1_str.split(":")
-                device2_key, port2_name = port2_str.split(":")
+                device1_key, port1_name = port1_str.split(":", 1)
+                device2_key, port2_name = port2_str.split(":", 1)
                 hostname1 = device_to_hostname[device1_key]
                 hostname2 = device_to_hostname[device2_key]
-                port1_key = f"{hostname1}:{port1_name}"
-                port2_key = f"{hostname2}:{port2_name}"
-                port1 = ports[port1_key]
-                port2 = ports[port2_key]
 
-                # Utilization in Mbit/s
-                def get_rate(port: Dict[str, Any], direction: str) -> float:
-                    rate_key = f"if{direction}Octets_rate"
-                    delta_key = f"if{direction}Octets_delta"
-                    if rate_key in port and port[rate_key] is not None:
-                        return float(port[rate_key] * 8 / 1e6)
-                    elif (
-                        delta_key in port
-                        and "poll_period" in port
-                        and port["poll_period"] > 0
-                    ):
-                        return float((port[delta_key] * 8 / port["poll_period"]) / 1e6)
-                    else:
-                        return 0.0
+                # Check if either node is a cloud/virtual node
+                is_cloud1 = is_cloud_node(hostname1)
+                is_cloud2 = is_cloud_node(hostname2)
 
-                out_rate1 = get_rate(port1, "Out")
-                out_rate2 = get_rate(port2, "Out")
+                if is_cloud1 and is_cloud2:
+                    # Both nodes are cloud - skip (no data to derive)
+                    print(f"Warning: Link {link_str} connects two cloud nodes - skipping")
+                    continue
+                elif is_cloud1:
+                    # Node 1 is cloud, derive from node 2's interface
+                    port2_key = f"{hostname2}:{port2_name}"
+                    if port2_key not in ports:
+                        print(f"Error: Port {port2_key} not found for cloud link")
+                        continue
+                    port2 = ports[port2_key]
+                    # Cloud outbound = managed interface inbound
+                    # Cloud inbound (managed outbound) = managed interface outbound
+                    out_rate1 = get_rate(port2, "In")   # Cloud outbound = managed In
+                    out_rate2 = get_rate(port2, "Out")  # Managed outbound
+                elif is_cloud2:
+                    # Node 2 is cloud, derive from node 1's interface
+                    port1_key = f"{hostname1}:{port1_name}"
+                    if port1_key not in ports:
+                        print(f"Error: Port {port1_key} not found for cloud link")
+                        continue
+                    port1 = ports[port1_key]
+                    # Managed outbound
+                    # Cloud outbound = managed interface inbound
+                    out_rate1 = get_rate(port1, "Out")  # Managed outbound
+                    out_rate2 = get_rate(port1, "In")   # Cloud outbound = managed In
+                else:
+                    # Normal link between two managed devices
+                    port1_key = f"{hostname1}:{port1_name}"
+                    port2_key = f"{hostname2}:{port2_name}"
+                    if port1_key not in ports:
+                        print(f"Error: Port {port1_key} not found")
+                        continue
+                    if port2_key not in ports:
+                        print(f"Error: Port {port2_key} not found")
+                        continue
+                    port1 = ports[port1_key]
+                    port2 = ports[port2_key]
+                    out_rate1 = get_rate(port1, "Out")
+                    out_rate2 = get_rate(port2, "Out")
 
                 # Store outbound utilization from each node
                 links.append(
@@ -197,9 +246,28 @@ def main():
     for link in links:
         G.add_edge(link["u"], link["v"])  # type: ignore
 
+    # Read cloud node color setting
+    cloud_node_color = (
+        config["settings"].get("cloud_node_color", "lightgray")
+        if config.has_section("settings")
+        else "lightgray"
+    )
+
     # Draw
     fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)  # type: ignore
-    nx.draw_networkx_nodes(G, pos, ax=ax, node_color=node_color, node_size=node_size**2)  # type: ignore
+
+    # Separate nodes into managed and cloud for different colors
+    managed_nodes = [h for h in G.nodes() if not is_cloud_node(h)]  # type: ignore
+    cloud_nodes = [h for h in G.nodes() if is_cloud_node(h)]  # type: ignore
+
+    # Draw managed nodes
+    if managed_nodes:
+        nx.draw_networkx_nodes(G, pos, nodelist=managed_nodes, ax=ax, node_color=node_color, node_size=node_size**2)  # type: ignore
+
+    # Draw cloud nodes with different color
+    if cloud_nodes:
+        nx.draw_networkx_nodes(G, pos, nodelist=cloud_nodes, ax=ax, node_color=cloud_node_color, node_size=node_size**2)  # type: ignore
+
     labels = {
         hostname: device_key.upper()
         for device_key, hostname in device_to_hostname.items()

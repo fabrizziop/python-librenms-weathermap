@@ -13,12 +13,20 @@ token = your_api_token_here
 # router1 = 192.168.1.1
 # switch1 = switch.example.com
 # firewall = 10.0.0.1
+#
+# Cloud/virtual nodes (unmanaged devices like ISP routers):
+# Use the "cloud:" prefix for devices not in LibreNMS
+# ISP = cloud:ISP_Gateway
+# Internet = cloud:Internet
 
 [links]
 # Link definitions: linkX = device1:port1 -- device2:port2
 # Example:
 # link1 = router1:eth0 -- switch1:GigabitEthernet0/1
 # link2 = switch1:GigabitEthernet0/2 -- firewall:eth1
+#
+# Cloud node links (utilization derived from managed device's interface):
+# link3 = router1:eth-wan -- ISP:wan
 
 [positions]
 # Device positions on the map (automatically managed by editor)
@@ -43,3 +51,6 @@ dpi = 100
 # Node color (matplotlib color name or hex code)
 # Examples: lightblue, lightgreen, #FF5733
 node_color = lightblue
+# Cloud node color (for unmanaged devices)
+# Examples: lightgray, #CCCCCC
+cloud_node_color = lightgray
