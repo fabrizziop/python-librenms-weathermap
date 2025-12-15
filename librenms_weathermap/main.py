@@ -406,19 +406,54 @@ def main():
     norm = mcolors.Normalize(vmin=min_util, vmax=max_util)  # type: ignore
     cmap = plt.cm.RdYlGn_r  # type: ignore  # Hue-based: green (low) -> yellow -> red (high)
 
+    # Create a mapping from edges to links
+    # Each edge (u, v, k) should match a link based on the nodes involved
+    edge_to_link: Dict[tuple[str, str, int], Dict[str, Any]] = {}
+    edge_counts: Dict[tuple[str, str], int] = {}
+    
+    for link in links:
+        # Create a normalized key (sorted nodes) to handle both directions
+        node_pair = tuple(sorted([link["u"], link["v"]]))
+        edge_idx = edge_counts.get(node_pair, 0)
+        edge_counts[node_pair] = edge_idx + 1
+        
+        # Store link for both possible edge directions
+        edge_to_link[(link["u"], link["v"], edge_idx)] = link
+        edge_to_link[(link["v"], link["u"], edge_idx)] = link
+
     # Draw edges split in the middle with different colors for each direction
     # Each half shows the outbound utilization from that node
-    for i, (u, v, k) in enumerate(edges):
-        link = links[i]
+    for u, v, k in edges:
+        link = edge_to_link.get((u, v, k))
+        if not link:
+            print(f"Warning: No link data found for edge ({u}, {v}, {k})")
+            continue
+        
+        # Check if edge direction matches link direction, swap if needed
+        if link["u"] == u and link["v"] == v:
+            # Same direction - use as-is
+            out_util1 = link["out_util1"]
+            out_util2 = link["out_util2"]
+            port1 = link["port1"]
+            port2 = link["port2"]
+        else:
+            # Swapped direction - swap the values
+            out_util1 = link["out_util2"]
+            out_util2 = link["out_util1"]
+            port1 = link["port2"]
+            port2 = link["port1"]
+        
         pos_u = np.array(pos[u])  # type: ignore
         pos_v = np.array(pos[v])  # type: ignore
 
         # Calculate midpoint
         midpoint = (pos_u + pos_v) / 2  # type: ignore
 
-        # Calculate curvature offset for multiple links
-        rad = 0.1 + 0.1 * k
-        if rad > 0:
+        # Calculate curvature offset for multiple links between same nodes
+        # Only apply offset when there are parallel links (k > 0)
+        rad = 0.0
+        if k > 0:
+            rad = 0.1 * k  # Offset amount increases with link index
             # Calculate perpendicular offset for curvature
             direction = pos_v - pos_u  # type: ignore
             distance = np.linalg.norm(direction)  # type: ignore
@@ -430,8 +465,8 @@ def main():
                 midpoint = midpoint + curve_offset  # type: ignore
 
         # Get colors for each half
-        color1 = cmap(norm(link["out_util1"]))  # type: ignore  # Color from u to midpoint
-        color2 = cmap(norm(link["out_util2"]))  # type: ignore  # Color from v to midpoint
+        color1 = cmap(norm(out_util1))  # type: ignore  # Color from u to midpoint
+        color2 = cmap(norm(out_util2))  # type: ignore  # Color from v to midpoint
 
         # Draw first half (u to midpoint)
         ax.plot(  # type: ignore
@@ -484,7 +519,7 @@ def main():
             ax.text(  # type: ignore
                 label_pos1[0],
                 label_pos1[1],
-                link["port1"],
+                port1,
                 fontsize=8,
                 ha="center",
                 va="center",
@@ -498,7 +533,7 @@ def main():
             ax.text(  # type: ignore
                 label_pos2[0],
                 label_pos2[1],
-                link["port2"],
+                port2,
                 fontsize=8,
                 ha="center",
                 va="center",
