@@ -9,6 +9,7 @@ Features
 - Multi-link support with curvature and per-end port labels
 - Configurable node color/size and output dimensions (width, height, DPI)
 - Cloud/virtual nodes for unmanaged devices (ISP gateways, external networks)
+- Pseudo nodes for one-to-many link scenarios (aggregating traffic from multiple sources)
 
 Install
 ```bash
@@ -48,6 +49,7 @@ fig_height = 12
 
 node_color = lightblue
 cloud_node_color = lightgray
+pseudo_node_color = lightyellow
 ```
 
 Use `python main.py --config config.ini --output map.png --no-show` to run headless.
@@ -82,6 +84,38 @@ link1 = router1:eth-wan -- ISP:wan
 The link utilization is derived from the managed device's interface:
 - Cloud outbound (towards your network) = managed interface inbound
 - Managed outbound (towards cloud) = managed interface outbound
+
+Pseudo Nodes (One-to-Many Links)
+--------------------------------
+Pseudo nodes act as junction points for scenarios where multiple managed devices connect to a single 
+external point (e.g., multiple internal routers connecting to a single ISP port).
+
+Use case: Your ISP provides a single uplink, but multiple internal routers share that connection.
+Instead of creating multiple cloud nodes, create a single pseudo node that aggregates the traffic.
+
+To add a pseudo node:
+1. In the editor, click "Add Pseudo Node" and give it a name (e.g., "ISP_Junction")
+2. Click "Add Pseudo Link" to connect managed devices to the pseudo node
+3. Repeat for each managed device connecting to this junction point
+
+In config.ini, pseudo nodes use the `pseudo:` prefix:
+```ini
+[devices]
+router1 = 192.168.1.1
+router2 = 192.168.1.2
+router3 = 192.168.1.3
+ISP_Junction = pseudo:ISP_Access_Point
+
+[links]
+link1 = router1:eth-wan -- ISP_Junction:virt-port1
+link2 = router2:eth-wan -- ISP_Junction:virt-port2
+link3 = router3:eth-wan -- ISP_Junction:virt-port3
+```
+
+Traffic aggregation:
+- Pseudo node inbound = sum of all connected managed interfaces' outbound
+- Pseudo node outbound = sum of all connected managed interfaces' inbound
+- Each link segment shows the traffic specific to that connection
 
 Testing
 -------

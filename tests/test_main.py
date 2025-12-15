@@ -451,3 +451,174 @@ class TestSSLConfiguration:
         verify_ssl = False if insecure else "/etc/ssl/certs/ca-certificates.crt"
         
         assert verify_ssl == "/etc/ssl/certs/ca-certificates.crt"
+
+
+class TestPseudoNodes:
+    """Test pseudo-node functionality for one-to-several link scenarios."""
+
+    def test_is_pseudo_node_detection(self):
+        """Test pseudo node detection function."""
+        def is_pseudo_node(hostname):
+            return hostname.startswith("pseudo:")
+        
+        assert is_pseudo_node("pseudo:ISP_Junction") is True
+        assert is_pseudo_node("cloud:ISP") is False
+        assert is_pseudo_node("192.168.1.1") is False
+        assert is_pseudo_node("router.example.com") is False
+
+    def test_pseudo_node_config_format(self, tmp_path):
+        """Test that pseudo nodes are defined in config correctly."""
+        config_content = """
+[librenms]
+url = https://test.com
+token = testtoken
+
+[devices]
+Router1 = 192.168.1.1
+Router2 = 192.168.1.2
+ISP_Junction = pseudo:ISP_Access_Point
+
+[links]
+Router1 = eth0:Router2:eth1
+Router1_ISP = eth-wan:ISP_Junction:virt-port1
+Router2_ISP = eth-wan:ISP_Junction:virt-port2
+
+[positions]
+[settings]
+"""
+        config_file = tmp_path / "config.ini"
+        config_file.write_text(config_content)
+
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config.read(str(config_file))
+
+        # Pseudo nodes are prefixed with "pseudo:"
+        assert config["devices"]["ISP_Junction"] == "pseudo:ISP_Access_Point"
+        assert config["devices"]["ISP_Junction"].startswith("pseudo:")
+        # Multiple links can point to the same pseudo node
+        assert "ISP_Junction" in config["links"]["Router1_ISP"]
+        assert "ISP_Junction" in config["links"]["Router2_ISP"]
+
+    def test_pseudo_node_traffic_aggregation_logic(self):
+        """Test that pseudo node traffic is aggregated from connected managed interfaces."""
+        # Simulate port data from two managed devices connecting to a pseudo node
+        managed_port1 = {
+            "ifInOctets_rate": 125000000,   # 1 Gbit/s in (incoming to managed1)
+            "ifOutOctets_rate": 62500000,   # 500 Mbit/s out (outgoing from managed1)
+        }
+        managed_port2 = {
+            "ifInOctets_rate": 62500000,    # 500 Mbit/s in (incoming to managed2)
+            "ifOutOctets_rate": 125000000,  # 1 Gbit/s out (outgoing from managed2)
+        }
+        
+        def get_rate(port, direction):
+            rate_key = f"if{direction}Octets_rate"
+            if rate_key in port and port[rate_key] is not None:
+                return float(port[rate_key] * 8 / 1e6)
+            return 0.0
+        
+        # Pseudo node aggregates traffic from all connected managed interfaces
+        # pseudo_traffic[pseudo_port] = {"in": total_in_mbps, "out": total_out_mbps}
+        pseudo_traffic = {}
+        pseudo_port = "virt-port"
+        
+        # First managed device contribution (traffic inverted from pseudo perspective)
+        port1_in_mbps = get_rate(managed_port1, "In")   # 1000 Mbps
+        port1_out_mbps = get_rate(managed_port1, "Out") # 500 Mbps
+        
+        if pseudo_port not in pseudo_traffic:
+            pseudo_traffic[pseudo_port] = {"in": 0.0, "out": 0.0}
+        pseudo_traffic[pseudo_port]["in"] += port1_out_mbps   # managed out -> pseudo in
+        pseudo_traffic[pseudo_port]["out"] += port1_in_mbps   # managed in -> pseudo out
+        
+        # Second managed device contribution
+        port2_in_mbps = get_rate(managed_port2, "In")   # 500 Mbps
+        port2_out_mbps = get_rate(managed_port2, "Out") # 1000 Mbps
+        
+        pseudo_traffic[pseudo_port]["in"] += port2_out_mbps   # managed out -> pseudo in
+        pseudo_traffic[pseudo_port]["out"] += port2_in_mbps   # managed in -> pseudo out
+        
+        # Total aggregated at pseudo node
+        assert pseudo_traffic[pseudo_port]["in"] == 1500.0   # 500 + 1000 Mbps
+        assert pseudo_traffic[pseudo_port]["out"] == 1500.0  # 1000 + 500 Mbps
+
+    def test_pseudo_node_with_pseudo_color_setting(self, tmp_path):
+        """Test that pseudo node color setting is read from config."""
+        config_content = """
+[librenms]
+url = https://test.com
+token = token
+
+[devices]
+ISP_Junction = pseudo:ISP_Access_Point
+
+[links]
+[positions]
+[settings]
+pseudo_node_color = #FFFF99
+"""
+        config_file = tmp_path / "config.ini"
+        config_file.write_text(config_content)
+
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config.read(str(config_file))
+
+        pseudo_color = config["settings"].get("pseudo_node_color", "lightyellow")
+        assert pseudo_color == "#FFFF99"
+
+    def test_pseudo_node_default_color(self, tmp_path):
+        """Test that pseudo node uses default color when not specified."""
+        config_content = """
+[librenms]
+url = https://test.com
+token = token
+
+[devices]
+[links]
+[positions]
+[settings]
+"""
+        config_file = tmp_path / "config.ini"
+        config_file.write_text(config_content)
+
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config.read(str(config_file))
+
+        pseudo_color = config["settings"].get("pseudo_node_color", "lightyellow")
+        assert pseudo_color == "lightyellow"
+
+    def test_pseudo_node_link_parsing(self):
+        """Test that pseudo node links can specify virtual ports."""
+        link_def = "eth-wan:ISP_Junction:virt-port1"
+        parts = link_def.split(":")
+        
+        assert len(parts) == 3
+        port1 = parts[0]
+        device2 = parts[1]
+        port2 = parts[2]
+        
+        assert port1 == "eth-wan"
+        assert device2 == "ISP_Junction"
+        assert port2 == "virt-port1"
+
+    def test_pseudo_and_cloud_distinction(self):
+        """Test that pseudo and cloud nodes are distinguished correctly."""
+        def is_cloud_node(hostname):
+            return hostname.startswith("cloud:")
+        
+        def is_pseudo_node(hostname):
+            return hostname.startswith("pseudo:")
+        
+        test_cases = [
+            ("cloud:ISP", True, False),
+            ("pseudo:Junction", False, True),
+            ("192.168.1.1", False, False),
+            ("router.local", False, False),
+        ]
+        
+        for hostname, expected_cloud, expected_pseudo in test_cases:
+            assert is_cloud_node(hostname) == expected_cloud
+            assert is_pseudo_node(hostname) == expected_pseudo

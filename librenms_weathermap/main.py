@@ -100,7 +100,11 @@ def main():
     def is_cloud_node(hostname: str) -> bool:
         return hostname.startswith("cloud:")
 
-    # Get devices (skip cloud nodes - they don't exist in LibreNMS)
+    # Helper function to check if a device is a pseudo-node (junction point)
+    def is_pseudo_node(hostname: str) -> bool:
+        return hostname.startswith("pseudo:")
+
+    # Get devices (skip cloud nodes and pseudo-nodes - they don't exist in LibreNMS)
     verify_ssl = False if args.insecure else "/etc/ssl/certs/ca-certificates.crt"
     if args.insecure:
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -109,6 +113,10 @@ def main():
         if is_cloud_node(hostname):
             # Cloud nodes don't need API data - store a placeholder
             devices[hostname] = {"hostname": hostname, "is_cloud": True}
+            continue
+        if is_pseudo_node(hostname):
+            # Pseudo-nodes don't need API data - store a placeholder
+            devices[hostname] = {"hostname": hostname, "is_pseudo": True}
             continue
         try:
             r = requests.get(
@@ -120,10 +128,10 @@ def main():
             print(f"Error fetching device {hostname}: {e}")
             continue
 
-    # Get ports for devices (skip cloud nodes)
+    # Get ports for devices (skip cloud nodes and pseudo-nodes)
     ports: Dict[str, Any] = {}
     for hostname in devices:
-        if is_cloud_node(hostname):
+        if is_cloud_node(hostname) or is_pseudo_node(hostname):
             continue
         try:
             r = requests.get(
@@ -158,7 +166,22 @@ def main():
         else:
             return 0.0
 
+    def get_pseudo_total_traffic(pseudo_hostname: str, direction: str) -> float:
+        """Get total aggregated traffic for a pseudo-node across all its ports."""
+        if pseudo_hostname not in pseudo_traffic:
+            return 0.0
+        total = 0.0
+        for port_data in pseudo_traffic[pseudo_hostname].values():
+            total += port_data.get(direction, 0.0)
+        return total
+
     links: List[Dict[str, Any]] = []
+
+    # First pass: collect all links to pseudo-nodes to calculate aggregated traffic
+    # pseudo_traffic[pseudo_hostname][port_name] = {"in": rate, "out": rate}
+    pseudo_traffic: Dict[str, Dict[str, Dict[str, float]]] = {}
+
+    # Pre-process links to identify pseudo-node connections and calculate their traffic
     if config.has_section("links"):
         for _, link_str in config["links"].items():
             try:
@@ -170,36 +193,129 @@ def main():
                 hostname1 = device_to_hostname[device1_key]
                 hostname2 = device_to_hostname[device2_key]
 
-                # Check if either node is a cloud/virtual node
+                is_pseudo1 = is_pseudo_node(hostname1)
+                is_pseudo2 = is_pseudo_node(hostname2)
+
+                # If one side is a pseudo-node and the other is managed, record traffic
+                if is_pseudo1 and not is_pseudo2 and not is_cloud_node(hostname2):
+                    port2_key = f"{hostname2}:{port2_name}"
+                    if port2_key in ports:
+                        port2 = ports[port2_key]
+                        if hostname1 not in pseudo_traffic:
+                            pseudo_traffic[hostname1] = {}
+                        if port1_name not in pseudo_traffic[hostname1]:
+                            pseudo_traffic[hostname1][port1_name] = {"in": 0.0, "out": 0.0}
+                        # Traffic INTO pseudo = outbound from managed device
+                        # Traffic OUT OF pseudo = inbound to managed device
+                        pseudo_traffic[hostname1][port1_name]["in"] += get_rate(port2, "Out")
+                        pseudo_traffic[hostname1][port1_name]["out"] += get_rate(port2, "In")
+
+                elif is_pseudo2 and not is_pseudo1 and not is_cloud_node(hostname1):
+                    port1_key = f"{hostname1}:{port1_name}"
+                    if port1_key in ports:
+                        port1 = ports[port1_key]
+                        if hostname2 not in pseudo_traffic:
+                            pseudo_traffic[hostname2] = {}
+                        if port2_name not in pseudo_traffic[hostname2]:
+                            pseudo_traffic[hostname2][port2_name] = {"in": 0.0, "out": 0.0}
+                        # Traffic INTO pseudo = outbound from managed device
+                        # Traffic OUT OF pseudo = inbound to managed device
+                        pseudo_traffic[hostname2][port2_name]["in"] += get_rate(port1, "Out")
+                        pseudo_traffic[hostname2][port2_name]["out"] += get_rate(port1, "In")
+
+            except (KeyError, ValueError):
+                continue
+
+    # Second pass: process all links with proper traffic data
+    if config.has_section("links"):
+        for _, link_str in config["links"].items():
+            try:
+                parts = link_str.split(" -- ")
+                port1_str = parts[0].strip()
+                port2_str = parts[1].strip()
+                device1_key, port1_name = port1_str.split(":", 1)
+                device2_key, port2_name = port2_str.split(":", 1)
+                hostname1 = device_to_hostname[device1_key]
+                hostname2 = device_to_hostname[device2_key]
+
+                # Check node types
                 is_cloud1 = is_cloud_node(hostname1)
                 is_cloud2 = is_cloud_node(hostname2)
+                is_pseudo1 = is_pseudo_node(hostname1)
+                is_pseudo2 = is_pseudo_node(hostname2)
 
-                if is_cloud1 and is_cloud2:
-                    # Both nodes are cloud - skip (no data to derive)
-                    print(f"Warning: Link {link_str} connects two cloud nodes - skipping")
-                    continue
+                # Skip links between two unmanaged nodes
+                if (is_cloud1 or is_pseudo1) and (is_cloud2 or is_pseudo2):
+                    if is_pseudo1 and is_pseudo2:
+                        # Pseudo-to-pseudo: use aggregated traffic from both sides
+                        out_rate1 = pseudo_traffic.get(hostname1, {}).get(port1_name, {}).get("out", 0.0)
+                        out_rate2 = pseudo_traffic.get(hostname2, {}).get(port2_name, {}).get("out", 0.0)
+                    elif is_pseudo1 and is_cloud2:
+                        # Pseudo-to-cloud: use TOTAL aggregated traffic from pseudo-node
+                        # pseudo "in" = traffic from managed devices going TO cloud
+                        # pseudo "out" = traffic from cloud going TO managed devices
+                        out_rate1 = get_pseudo_total_traffic(hostname1, "in")   # Pseudo->Cloud
+                        out_rate2 = get_pseudo_total_traffic(hostname1, "out")  # Cloud->Pseudo
+                    elif is_cloud1 and is_pseudo2:
+                        # Cloud-to-pseudo: use TOTAL aggregated traffic from pseudo-node
+                        out_rate1 = get_pseudo_total_traffic(hostname2, "out")  # Cloud->Pseudo
+                        out_rate2 = get_pseudo_total_traffic(hostname2, "in")   # Pseudo->Cloud
+                    else:
+                        # Cloud-to-cloud: skip
+                        print(f"Warning: Link {link_str} connects two cloud nodes - skipping")
+                        continue
                 elif is_cloud1:
                     # Node 1 is cloud, derive from node 2's interface
-                    port2_key = f"{hostname2}:{port2_name}"
-                    if port2_key not in ports:
-                        print(f"Error: Port {port2_key} not found for cloud link")
-                        continue
-                    port2 = ports[port2_key]
-                    # Cloud outbound = managed interface inbound
-                    # Cloud inbound (managed outbound) = managed interface outbound
-                    out_rate1 = get_rate(port2, "In")   # Cloud outbound = managed In
-                    out_rate2 = get_rate(port2, "Out")  # Managed outbound
+                    if is_pseudo2:
+                        # Cloud to pseudo - use TOTAL aggregated pseudo traffic
+                        # pseudo "in" = traffic going TO cloud, pseudo "out" = traffic FROM cloud
+                        out_rate1 = get_pseudo_total_traffic(hostname2, "out")  # Cloud->Pseudo
+                        out_rate2 = get_pseudo_total_traffic(hostname2, "in")   # Pseudo->Cloud
+                    else:
+                        port2_key = f"{hostname2}:{port2_name}"
+                        if port2_key not in ports:
+                            print(f"Error: Port {port2_key} not found for cloud link")
+                            continue
+                        port2 = ports[port2_key]
+                        out_rate1 = get_rate(port2, "In")   # Cloud outbound = managed In
+                        out_rate2 = get_rate(port2, "Out")  # Managed outbound
                 elif is_cloud2:
                     # Node 2 is cloud, derive from node 1's interface
+                    if is_pseudo1:
+                        # Pseudo to cloud - use TOTAL aggregated pseudo traffic
+                        # pseudo "in" = traffic going TO cloud, pseudo "out" = traffic FROM cloud
+                        out_rate1 = get_pseudo_total_traffic(hostname1, "in")   # Pseudo->Cloud
+                        out_rate2 = get_pseudo_total_traffic(hostname1, "out")  # Cloud->Pseudo
+                    else:
+                        port1_key = f"{hostname1}:{port1_name}"
+                        if port1_key not in ports:
+                            print(f"Error: Port {port1_key} not found for cloud link")
+                            continue
+                        port1 = ports[port1_key]
+                        out_rate1 = get_rate(port1, "Out")  # Managed outbound
+                        out_rate2 = get_rate(port1, "In")   # Cloud outbound = managed In
+                elif is_pseudo1:
+                    # Node 1 is pseudo, node 2 is managed
+                    port2_key = f"{hostname2}:{port2_name}"
+                    if port2_key not in ports:
+                        print(f"Error: Port {port2_key} not found for pseudo link")
+                        continue
+                    port2 = ports[port2_key]
+                    # Pseudo outbound to this device = managed inbound
+                    # Managed outbound = traffic going into pseudo
+                    out_rate1 = get_rate(port2, "In")   # Pseudo outbound = managed In
+                    out_rate2 = get_rate(port2, "Out")  # Managed outbound
+                elif is_pseudo2:
+                    # Node 2 is pseudo, node 1 is managed
                     port1_key = f"{hostname1}:{port1_name}"
                     if port1_key not in ports:
-                        print(f"Error: Port {port1_key} not found for cloud link")
+                        print(f"Error: Port {port1_key} not found for pseudo link")
                         continue
                     port1 = ports[port1_key]
-                    # Managed outbound
-                    # Cloud outbound = managed interface inbound
+                    # Managed outbound = traffic going into pseudo
+                    # Pseudo outbound to this device = managed inbound
                     out_rate1 = get_rate(port1, "Out")  # Managed outbound
-                    out_rate2 = get_rate(port1, "In")   # Cloud outbound = managed In
+                    out_rate2 = get_rate(port1, "In")   # Pseudo outbound = managed In
                 else:
                     # Normal link between two managed devices
                     port1_key = f"{hostname1}:{port1_name}"
@@ -253,12 +369,20 @@ def main():
         else "lightgray"
     )
 
+    # Read pseudo node color setting
+    pseudo_node_color = (
+        config["settings"].get("pseudo_node_color", "lightyellow")
+        if config.has_section("settings")
+        else "lightyellow"
+    )
+
     # Draw
     fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)  # type: ignore
 
-    # Separate nodes into managed and cloud for different colors
-    managed_nodes = [h for h in G.nodes() if not is_cloud_node(h)]  # type: ignore
+    # Separate nodes into managed, cloud, and pseudo for different colors
+    managed_nodes = [h for h in G.nodes() if not is_cloud_node(h) and not is_pseudo_node(h)]  # type: ignore
     cloud_nodes = [h for h in G.nodes() if is_cloud_node(h)]  # type: ignore
+    pseudo_nodes = [h for h in G.nodes() if is_pseudo_node(h)]  # type: ignore
 
     # Draw managed nodes
     if managed_nodes:
@@ -267,6 +391,10 @@ def main():
     # Draw cloud nodes with different color
     if cloud_nodes:
         nx.draw_networkx_nodes(G, pos, nodelist=cloud_nodes, ax=ax, node_color=cloud_node_color, node_size=node_size**2)  # type: ignore
+
+    # Draw pseudo nodes with different color
+    if pseudo_nodes:
+        nx.draw_networkx_nodes(G, pos, nodelist=pseudo_nodes, ax=ax, node_color=pseudo_node_color, node_size=node_size**2)  # type: ignore
 
     labels = {
         hostname: device_key.upper()

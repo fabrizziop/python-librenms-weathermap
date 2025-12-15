@@ -18,6 +18,10 @@ token = your_api_token_here
 # Use the "cloud:" prefix for devices not in LibreNMS
 # ISP = cloud:ISP_Gateway
 # Internet = cloud:Internet
+#
+# Pseudo nodes (for one-to-many link scenarios):
+# Use the "pseudo:" prefix for junction points that aggregate traffic
+# ISP_Junction = pseudo:ISP_Access_Point
 
 [links]
 # Link definitions: linkX = device1:port1 -- device2:port2
@@ -27,6 +31,13 @@ token = your_api_token_here
 #
 # Cloud node links (utilization derived from managed device's interface):
 # link3 = router1:eth-wan -- ISP:wan
+#
+# Pseudo node links (for one-to-several scenarios):
+# Multiple managed devices can link to the same pseudo node.
+# Traffic at the pseudo node is aggregated from all connected interfaces.
+# Use case: Single ISP port serving multiple internal routers
+# link4 = router1:eth-wan -- ISP_Junction:virt-port1
+# link5 = router2:eth-wan -- ISP_Junction:virt-port2
 
 [positions]
 # Device positions on the map (automatically managed by editor)
@@ -54,3 +65,6 @@ node_color = lightblue
 # Cloud node color (for unmanaged devices)
 # Examples: lightgray, #CCCCCC
 cloud_node_color = lightgray
+# Pseudo node color (for junction/aggregation points)
+# Examples: lightyellow, #FFFF99
+pseudo_node_color = lightyellow

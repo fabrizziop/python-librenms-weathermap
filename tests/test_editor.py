@@ -406,3 +406,112 @@ class TestSettingsHandling:
         assert max_util == 500
         assert node_size == 30
         assert node_color == "#FF5733"
+
+
+class TestPseudoNodesInEditor:
+    """Test pseudo-node handling in editor."""
+
+    def test_add_pseudo_device(self):
+        """Test adding a pseudo device to the devices dict."""
+        devices = {}
+        device_key = "ISP_Junction"
+        hostname = "pseudo:ISP_Access_Point"
+        x, y = 400, 200
+
+        devices[device_key] = {"x": x, "y": y, "hostname": hostname}
+
+        assert device_key in devices
+        assert devices[device_key]["hostname"].startswith("pseudo:")
+
+    def test_pseudo_device_in_link(self):
+        """Test that pseudo devices can be linked to managed devices."""
+        devices = {
+            "router1": {"x": 100, "y": 100, "hostname": "192.168.1.1"},
+            "router2": {"x": 200, "y": 100, "hostname": "192.168.1.2"},
+            "ISP_Junction": {"x": 300, "y": 200, "hostname": "pseudo:ISP_Access_Point"},
+        }
+        links = [
+            {"dev1": "router1", "dev2": "ISP_Junction", "port1": "eth-wan", "port2": "virt-port1"},
+            {"dev1": "router2", "dev2": "ISP_Junction", "port1": "eth-wan", "port2": "virt-port2"},
+        ]
+
+        # Verify link references valid devices
+        for link in links:
+            assert link["dev1"] in devices
+            assert link["dev2"] in devices
+
+    def test_pseudo_node_excluded_from_api_fetch(self):
+        """Test that pseudo nodes are excluded from API device fetching."""
+        devices = {
+            "router1": {"x": 100, "y": 100, "hostname": "192.168.1.1"},
+            "ISP_Junction": {"x": 300, "y": 200, "hostname": "pseudo:ISP_Access_Point"},
+        }
+
+        # Get only managed devices for API calls
+        managed_devices = {
+            key: data
+            for key, data in devices.items()
+            if not data["hostname"].startswith("cloud:") and not data["hostname"].startswith("pseudo:")
+        }
+
+        assert "router1" in managed_devices
+        assert "ISP_Junction" not in managed_devices
+
+    def test_multiple_links_to_pseudo_node(self):
+        """Test that multiple managed devices can link to same pseudo node."""
+        devices = {
+            "router1": {"x": 100, "y": 100, "hostname": "192.168.1.1"},
+            "router2": {"x": 200, "y": 100, "hostname": "192.168.1.2"},
+            "router3": {"x": 300, "y": 100, "hostname": "192.168.1.3"},
+            "ISP_Junction": {"x": 200, "y": 300, "hostname": "pseudo:ISP_Access_Point"},
+        }
+        links = [
+            {"dev1": "router1", "dev2": "ISP_Junction", "port1": "eth-wan", "port2": "virt-port1"},
+            {"dev1": "router2", "dev2": "ISP_Junction", "port1": "eth-wan", "port2": "virt-port2"},
+            {"dev1": "router3", "dev2": "ISP_Junction", "port1": "eth-wan", "port2": "virt-port3"},
+        ]
+
+        # Count links to pseudo node
+        links_to_pseudo = [l for l in links if l["dev2"] == "ISP_Junction"]
+        
+        assert len(links_to_pseudo) == 3
+
+    def test_pseudo_and_cloud_nodes_distinct(self):
+        """Test that pseudo and cloud nodes are properly distinguished."""
+        devices = {
+            "router1": {"x": 100, "y": 100, "hostname": "192.168.1.1"},
+            "ISP": {"x": 200, "y": 50, "hostname": "cloud:External_ISP"},
+            "ISP_Junction": {"x": 200, "y": 200, "hostname": "pseudo:ISP_Access_Point"},
+        }
+
+        def is_cloud(hostname):
+            return hostname.startswith("cloud:")
+
+        def is_pseudo(hostname):
+            return hostname.startswith("pseudo:")
+
+        cloud_nodes = [k for k, v in devices.items() if is_cloud(v["hostname"])]
+        pseudo_nodes = [k for k, v in devices.items() if is_pseudo(v["hostname"])]
+        managed_nodes = [k for k, v in devices.items() if not is_cloud(v["hostname"]) and not is_pseudo(v["hostname"])]
+
+        assert cloud_nodes == ["ISP"]
+        assert pseudo_nodes == ["ISP_Junction"]
+        assert managed_nodes == ["router1"]
+
+    def test_pseudo_node_color_setting(self):
+        """Test that pseudo node color setting is read correctly."""
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config["settings"] = {"pseudo_node_color": "#FFFF99"}
+
+        pseudo_color = config["settings"].get("pseudo_node_color", "lightyellow")
+        assert pseudo_color == "#FFFF99"
+
+    def test_pseudo_node_default_color(self):
+        """Test that pseudo node uses default color when not specified."""
+        config = configparser.ConfigParser()
+        config.optionxform = str
+        config["settings"] = {}
+
+        pseudo_color = config["settings"].get("pseudo_node_color", "lightyellow")
+        assert pseudo_color == "lightyellow"

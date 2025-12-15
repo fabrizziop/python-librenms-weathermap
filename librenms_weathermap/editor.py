@@ -21,23 +21,25 @@ Requirements:
     - config.ini file (created automatically if missing)
 """
 
-import tkinter as tk
-from tkinter import messagebox, simpledialog
+import argparse
 import configparser
 import os
 from typing import Any, Dict, List
 import urllib3
 
+import tkinter as tk
+from tkinter import messagebox, simpledialog
+
 import requests  # type: ignore
 
 
 class ConfigEditor:
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Tk, config_file: str = "config.ini") -> None:
         self.root = root
-        self.root.title("LibreNMS Weathermap Config Editor")  # type: ignore
         self.config = configparser.ConfigParser()
         self.config.optionxform = str  # type: ignore
-        self.filename = "config.ini"
+        self.filename = config_file
+        self.root.title(f"LibreNMS Weathermap Config Editor - {self.filename}")  # type: ignore
         self.devices: Dict[str, Any] = {}
         self.links: List[Dict[str, str]] = []
         self.scale = 1.0
@@ -61,9 +63,12 @@ class ConfigEditor:
         )
         tk.Button(toolbar, text="Add Device", command=self.add_device).pack(fill=tk.X)
         tk.Button(toolbar, text="Add Cloud Node", command=self.add_cloud_node).pack(fill=tk.X)
+        tk.Button(toolbar, text="Add Pseudo Node", command=self.add_pseudo_node).pack(fill=tk.X)
         tk.Button(toolbar, text="Add Link", command=self.add_link).pack(fill=tk.X)
         tk.Button(toolbar, text="Add Cloud Link", command=self.add_cloud_link).pack(fill=tk.X)
+        tk.Button(toolbar, text="Add Pseudo Link", command=self.add_pseudo_link).pack(fill=tk.X)
         tk.Button(toolbar, text="Bulk Add", command=self.bulk_add).pack(fill=tk.X)
+        tk.Button(toolbar, text="Bulk Add Links", command=self.bulk_add_links).pack(fill=tk.X)
         tk.Button(
             toolbar, text="Remove Unlinked", command=self.remove_unlinked_devices
         ).pack(fill=tk.X)
@@ -135,7 +140,7 @@ class ConfigEditor:
 
         with open(self.filename, "w") as f:
             self.config.write(f)
-        messagebox.showinfo("Saved", "Configuration saved to config.ini")
+        messagebox.showinfo("Saved", f"Configuration saved to {self.filename}")
 
     def fetch_devices(self) -> None:
         try:
@@ -166,6 +171,10 @@ class ConfigEditor:
         """Check if a hostname represents a cloud/virtual node."""
         return hostname.startswith("cloud:")
 
+    def is_pseudo_node(self, hostname: str) -> bool:
+        """Check if a hostname represents a pseudo-node (junction point)."""
+        return hostname.startswith("pseudo:")
+
     def add_cloud_node(self) -> None:
         """Add a cloud/virtual node (unmanaged device like ISP gateway)."""
         cloud_name = simpledialog.askstring(
@@ -195,6 +204,36 @@ class ConfigEditor:
             self.devices[device_key] = {"x": x, "y": y, "hostname": f"cloud:{cloud_name}"}
             self.draw_network()
             messagebox.showinfo("Success", f"Added cloud node '{device_key}'")
+
+    def add_pseudo_node(self) -> None:
+        """Add a pseudo-node (junction point for one-to-many connections)."""
+        pseudo_name = simpledialog.askstring(
+            "Pseudo Node Name",
+            "Enter a name for the pseudo-node (e.g., ISP_Junction, WAN_Hub):",
+            initialvalue="Junction"
+        )
+        if not pseudo_name:
+            return
+
+        # Sanitize name for use as device key
+        device_key = pseudo_name.replace(" ", "_")
+
+        if device_key in self.devices:
+            messagebox.showerror("Error", f"Device {device_key} already exists")
+            return
+
+        x = simpledialog.askinteger(
+            "X Position", "Enter X position:", initialvalue=100
+        )
+        y = simpledialog.askinteger(
+            "Y Position", "Enter Y position:", initialvalue=100
+        )
+
+        if x is not None and y is not None:
+            # Pseudo nodes use "pseudo:" prefix in hostname
+            self.devices[device_key] = {"x": x, "y": y, "hostname": f"pseudo:{pseudo_name}"}
+            self.draw_network()
+            messagebox.showinfo("Success", f"Added pseudo-node '{device_key}'")
 
     def add_device(self) -> None:
         if not self.fetched_devices:
@@ -388,23 +427,170 @@ class ConfigEditor:
         self.draw_network()
 
     def add_cloud_link(self) -> None:
-        """Add a link between a managed device and a cloud node."""
+        """Add a link between a managed device (or pseudo node) and a cloud node."""
         if not self.devices:
             messagebox.showerror("Error", "Add devices first")  # type: ignore
             return
 
-        # Separate cloud and managed devices
+        # Separate cloud, pseudo, and managed devices
         cloud_devices = {
             key: data for key, data in self.devices.items()
             if self.is_cloud_node(data["hostname"])
         }
+        pseudo_devices = {
+            key: data for key, data in self.devices.items()
+            if self.is_pseudo_node(data["hostname"])
+        }
         managed_devices = {
             key: data for key, data in self.devices.items()
-            if not self.is_cloud_node(data["hostname"])
+            if not self.is_cloud_node(data["hostname"]) and not self.is_pseudo_node(data["hostname"])
         }
+        # Devices that can link to cloud: managed + pseudo
+        linkable_devices = {**managed_devices, **pseudo_devices}
 
         if not cloud_devices:
             messagebox.showerror("Error", "No cloud nodes found. Add a cloud node first.")
+            return
+        if not linkable_devices:
+            messagebox.showerror("Error", "No managed devices or pseudo nodes found.")
+            return
+
+        # Select the source device (managed or pseudo)
+        select_win1 = tk.Toplevel(self.root)
+        select_win1.title("Select Device (Managed or Pseudo)")
+        listbox1 = tk.Listbox(select_win1, height=20, width=50)
+        for key in sorted(linkable_devices.keys()):
+            suffix = " [pseudo]" if key in pseudo_devices else ""
+            listbox1.insert(tk.END, f"{key}{suffix}")
+        listbox1.pack()
+        source_dev_var = [None]
+
+        def select_source():
+            selection = listbox1.curselection()
+            if selection:
+                selected = listbox1.get(selection[0])
+                # Remove suffix if present
+                source_dev_var[0] = selected.replace(" [pseudo]", "")
+            select_win1.destroy()
+
+        tk.Button(select_win1, text="Select", command=select_source).pack()
+        self.root.wait_window(select_win1)
+        if not source_dev_var[0]:
+            return
+        source_key = source_dev_var[0]
+        source_is_pseudo = source_key in pseudo_devices
+
+        # Select the cloud node
+        select_win2 = tk.Toplevel(self.root)
+        select_win2.title("Select Cloud Node")
+        listbox2 = tk.Listbox(select_win2, height=20, width=50)
+        for key in sorted(cloud_devices.keys()):
+            listbox2.insert(tk.END, key)
+        listbox2.pack()
+        cloud_dev_var = [None]
+
+        def select_cloud():
+            selection = listbox2.curselection()
+            if selection:
+                cloud_dev_var[0] = listbox2.get(selection[0])
+            select_win2.destroy()
+
+        tk.Button(select_win2, text="Select", command=select_cloud).pack()
+        self.root.wait_window(select_win2)
+        if not cloud_dev_var[0]:
+            return
+        cloud_key = cloud_dev_var[0]
+
+        # Get port for source device
+        if source_is_pseudo:
+            # Pseudo node: ask for virtual port name
+            source_port = simpledialog.askstring(
+                "Pseudo Node Port",
+                f"Enter a name for the virtual port on {source_key}:",
+                initialvalue="uplink"
+            )
+            if not source_port:
+                return
+        else:
+            # Managed device: fetch ports from LibreNMS API
+            source_hostname = linkable_devices[source_key]["hostname"]
+            try:
+                url = self.config["librenms"]["url"]
+                token = self.config["librenms"]["token"]
+                headers = {"X-Auth-Token": token}
+                verify_ssl = False if self.insecure_var.get() else "/etc/ssl/certs/ca-certificates.crt"
+                if self.insecure_var.get():
+                    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                r = requests.get(
+                    f"{url}/api/v0/devices/{source_hostname}/ports",
+                    headers=headers,
+                    params={"columns": "ifName"},
+                    verify=verify_ssl,
+                )
+                r.raise_for_status()
+                ports: List[str] = [p["ifName"] for p in r.json()["ports"]]
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to fetch ports for {source_hostname}: {e}")
+                return
+
+            # Select port on managed device
+            select_win3 = tk.Toplevel(self.root)
+            select_win3.title(f"Select Port on {source_key}")
+            listbox3 = tk.Listbox(select_win3, height=20, width=50)
+            for port in sorted(ports):
+                listbox3.insert(tk.END, port)
+            listbox3.pack()
+            port_var = [None]
+
+            def select_port():
+                selection = listbox3.curselection()
+                if selection:
+                    port_var[0] = listbox3.get(selection[0])
+                select_win3.destroy()
+
+            tk.Button(select_win3, text="Select", command=select_port).pack()
+            self.root.wait_window(select_win3)
+            if not port_var[0]:
+                return
+            source_port = port_var[0]
+
+        # Ask for virtual port name on cloud side
+        cloud_port = simpledialog.askstring(
+            "Cloud Port Name",
+            f"Enter a name for the virtual port on {cloud_key}:",
+            initialvalue="wan"
+        )
+        if not cloud_port:
+            return
+
+        # Add link (source device first, cloud second)
+        self.links.append({
+            "dev1": source_key,
+            "dev2": cloud_key,
+            "port1": source_port,
+            "port2": cloud_port
+        })
+        self.draw_network()
+        messagebox.showinfo("Success", f"Added link: {source_key}:{source_port} -- {cloud_key}:{cloud_port}")
+
+    def add_pseudo_link(self) -> None:
+        """Add a link between a managed device and a pseudo-node (junction point)."""
+        if not self.devices:
+            messagebox.showerror("Error", "Add devices first")  # type: ignore
+            return
+
+        # Separate pseudo and managed devices
+        pseudo_devices = {
+            key: data for key, data in self.devices.items()
+            if self.is_pseudo_node(data["hostname"])
+        }
+        managed_devices = {
+            key: data for key, data in self.devices.items()
+            if not self.is_pseudo_node(data["hostname"]) and not self.is_cloud_node(data["hostname"])
+        }
+
+        if not pseudo_devices:
+            messagebox.showerror("Error", "No pseudo-nodes found. Add a pseudo-node first.")
             return
         if not managed_devices:
             messagebox.showerror("Error", "No managed devices found. Add a device first.")
@@ -432,26 +618,26 @@ class ConfigEditor:
         managed_key = managed_dev_var[0]
         managed_hostname = managed_devices[managed_key]["hostname"]
 
-        # Select the cloud node
+        # Select the pseudo node
         select_win2 = tk.Toplevel(self.root)
-        select_win2.title("Select Cloud Node")
+        select_win2.title("Select Pseudo Node")
         listbox2 = tk.Listbox(select_win2, height=20, width=50)
-        for key in sorted(cloud_devices.keys()):
+        for key in sorted(pseudo_devices.keys()):
             listbox2.insert(tk.END, key)
         listbox2.pack()
-        cloud_dev_var = [None]
+        pseudo_dev_var = [None]
 
-        def select_cloud():
+        def select_pseudo():
             selection = listbox2.curselection()
             if selection:
-                cloud_dev_var[0] = listbox2.get(selection[0])
+                pseudo_dev_var[0] = listbox2.get(selection[0])
             select_win2.destroy()
 
-        tk.Button(select_win2, text="Select", command=select_cloud).pack()
+        tk.Button(select_win2, text="Select", command=select_pseudo).pack()
         self.root.wait_window(select_win2)
-        if not cloud_dev_var[0]:
+        if not pseudo_dev_var[0]:
             return
-        cloud_key = cloud_dev_var[0]
+        pseudo_key = pseudo_dev_var[0]
 
         # Fetch ports for managed device
         try:
@@ -494,24 +680,24 @@ class ConfigEditor:
             return
         managed_port = port_var[0]
 
-        # Ask for virtual port name on cloud side
-        cloud_port = simpledialog.askstring(
-            "Cloud Port Name",
-            f"Enter a name for the virtual port on {cloud_key}:",
-            initialvalue="wan"
+        # Ask for virtual port name on pseudo side
+        pseudo_port = simpledialog.askstring(
+            "Pseudo Node Port Name",
+            f"Enter a name for the virtual port on {pseudo_key}:",
+            initialvalue="link"
         )
-        if not cloud_port:
+        if not pseudo_port:
             return
 
-        # Add link (managed device first, cloud second)
+        # Add link (managed device first, pseudo second)
         self.links.append({
             "dev1": managed_key,
-            "dev2": cloud_key,
+            "dev2": pseudo_key,
             "port1": managed_port,
-            "port2": cloud_port
+            "port2": pseudo_port
         })
         self.draw_network()
-        messagebox.showinfo("Success", f"Added link: {managed_key}:{managed_port} -- {cloud_key}:{cloud_port}")
+        messagebox.showinfo("Success", f"Added link: {managed_key}:{managed_port} -- {pseudo_key}:{pseudo_port}")
 
     def bulk_add(self) -> None:
         if not self.fetched_devices:
@@ -628,6 +814,129 @@ class ConfigEditor:
             "Bulk Add", f"Added {len(self.devices)} devices and {len(self.links)} links"
         )
 
+    def bulk_add_links(self) -> None:
+        """Add links between existing devices based on subnet matching (no new devices)."""
+        if not self.devices:
+            messagebox.showerror("Error", "No devices in config. Add devices first.")  # type: ignore
+            return
+
+        try:
+            url = self.config["librenms"]["url"]
+            token = self.config["librenms"]["token"]
+            headers = {"X-Auth-Token": token}
+        except KeyError:
+            messagebox.showerror("Error", "Set URL and Token in Settings first")  # type: ignore
+            return
+
+        # Ask for max prefix
+        max_prefix = simpledialog.askinteger(
+            "Max Prefix",
+            "Enter maximum prefix length for subnet matching (default 30):",
+            initialvalue=30,
+        )
+        if max_prefix is None:
+            return
+
+        # Build hostname to device_key mapping from existing devices
+        # Only include managed devices (not cloud/pseudo)
+        hostname_to_key: Dict[str, str] = {}
+        for device_key, data in self.devices.items():
+            hostname = data["hostname"]
+            if not self.is_cloud_node(hostname) and not self.is_pseudo_node(hostname):
+                hostname_to_key[hostname] = device_key
+
+        if not hostname_to_key:
+            messagebox.showerror("Error", "No managed devices found in config.")  # type: ignore
+            return
+
+        # Collect IP addresses and port mappings for existing devices only
+        ip_list = []  # list of (ip, hostname, port_id, prefix)
+        port_id_to_name: Dict[int, str] = {}
+        from collections import defaultdict
+        import ipaddress
+
+        subnet_to_ips = defaultdict(list)
+
+        verify_ssl = False if self.insecure_var.get() else "/etc/ssl/certs/ca-certificates.crt"
+        if self.insecure_var.get():
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        for hostname in hostname_to_key.keys():
+            try:
+                # Fetch IPs
+                r = requests.get(f"{url}/api/v0/devices/{hostname}/ip", headers=headers, verify=verify_ssl)
+                r.raise_for_status()
+                addresses = r.json()["addresses"]
+                for addr in addresses:
+                    if "ipv4_address" in addr:
+                        ip = addr["ipv4_address"]
+                        port_id = addr["port_id"]
+                        prefix = addr["ipv4_prefixlen"]
+                        ip_list.append((ip, hostname, port_id, prefix))
+                        network = ipaddress.IPv4Network(f"{ip}/{prefix}", strict=False)
+                        subnet_key = (network.network_address, prefix)
+                        subnet_to_ips[subnet_key].append(ip)
+                # Fetch ports for name mapping
+                r = requests.get(
+                    f"{url}/api/v0/devices/{hostname}/ports?columns=port_id,ifName",
+                    headers=headers,
+                    verify=verify_ssl,
+                )
+                r.raise_for_status()
+                ports = r.json()["ports"]
+                for port in ports:
+                    port_id_to_name[port["port_id"]] = port["ifName"]
+            except Exception as e:
+                print(f"Error fetching data for {hostname}: {e}")
+                continue
+
+        # Find links from subnets with exactly 2 IPs and prefix <= max_prefix
+        link_candidates = []
+        for subnet_key, ips in subnet_to_ips.items():
+            network_addr, prefix = subnet_key
+            if len(ips) == 2 and prefix <= max_prefix:
+                ip1, ip2 = ips
+                # Find the details
+                data1 = next((h, p, pr) for i, h, p, pr in ip_list if i == ip1)
+                data2 = next((h, p, pr) for i, h, p, pr in ip_list if i == ip2)
+                host1, pid1, prefix1 = data1
+                host2, pid2, prefix2 = data2
+                if host1 in hostname_to_key and host2 in hostname_to_key:
+                    port1 = port_id_to_name.get(pid1, "unknown")
+                    port2 = port_id_to_name.get(pid2, "unknown")
+                    dev1_key = hostname_to_key[host1]
+                    dev2_key = hostname_to_key[host2]
+                    link_candidates.append(
+                        {
+                            "dev1": dev1_key,
+                            "dev2": dev2_key,
+                            "port1": port1,
+                            "port2": port2,
+                        }
+                    )
+
+        # Build set of existing links to avoid duplicates
+        existing_links = set()
+        for link in self.links:
+            existing_links.add((link["dev1"], link["dev2"], link["port1"], link["port2"]))
+            # Also add reverse to catch duplicates in either direction
+            existing_links.add((link["dev2"], link["dev1"], link["port2"], link["port1"]))
+
+        # Add new links only
+        added_count = 0
+        for link in link_candidates:
+            link_key = (link["dev1"], link["dev2"], link["port1"], link["port2"])
+            link_key_rev = (link["dev2"], link["dev1"], link["port2"], link["port1"])
+            if link_key not in existing_links and link_key_rev not in existing_links:
+                self.links.append(link)
+                existing_links.add(link_key)
+                added_count += 1
+
+        self.draw_network()
+        messagebox.showinfo(
+            "Bulk Add Links", f"Added {added_count} new links (found {len(link_candidates)} candidates)"
+        )
+
     def remove_unlinked_devices(self) -> None:
         # Find all devices that are referenced in links
         linked_devices: set[str] = set()
@@ -679,13 +988,19 @@ class ConfigEditor:
         node_size = int(self.config["settings"].get("node_size", 20))
         node_color = self.config["settings"].get("node_color", "lightblue")
         cloud_node_color = self.config["settings"].get("cloud_node_color", "lightgray")
+        pseudo_node_color = self.config["settings"].get("pseudo_node_color", "lightyellow")
         # In matplotlib, node_size is area (radius^2), so we need to adjust for canvas display
         # Using a scale factor to approximate the visual size
         canvas_radius = node_size / 2.5  # Scale factor to match matplotlib's appearance
         for device_key, data in self.devices.items():
             x, y = data["x"], data["y"]
-            # Use different color for cloud nodes
-            fill_color = cloud_node_color if self.is_cloud_node(data["hostname"]) else node_color
+            # Use different color for cloud and pseudo nodes
+            if self.is_cloud_node(data["hostname"]):
+                fill_color = cloud_node_color
+            elif self.is_pseudo_node(data["hostname"]):
+                fill_color = pseudo_node_color
+            else:
+                fill_color = node_color
             self.canvas.create_oval(
                 x - canvas_radius,
                 y - canvas_radius,
@@ -921,6 +1236,14 @@ class ConfigEditor:
             row=9, column=1
         )
 
+        tk.Label(settings_win, text="Pseudo Node Color:").grid(row=10, column=0, sticky="e")
+        pseudo_node_color_var = tk.StringVar(
+            value=self.config["settings"].get("pseudo_node_color", "lightyellow")
+        )
+        tk.Entry(settings_win, textvariable=pseudo_node_color_var, width=50).grid(
+            row=10, column=1
+        )
+
         def save():
             self.config["librenms"]["url"] = url_var.get()
             self.config["librenms"]["token"] = token_var.get()
@@ -932,13 +1255,14 @@ class ConfigEditor:
             self.config["settings"]["dpi"] = dpi_var.get()
             self.config["settings"]["node_color"] = node_color_var.get()
             self.config["settings"]["cloud_node_color"] = cloud_node_color_var.get()
+            self.config["settings"]["pseudo_node_color"] = pseudo_node_color_var.get()
             settings_win.destroy()
 
         tk.Button(settings_win, text="Save", command=save).grid(
-            row=10, column=0, pady=10
+            row=11, column=0, pady=10
         )
         tk.Button(settings_win, text="Cancel", command=settings_win.destroy).grid(
-            row=10, column=1, pady=10
+            row=11, column=1, pady=10
         )
 
     def mainloop(self) -> None:
@@ -946,8 +1270,16 @@ class ConfigEditor:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="LibreNMS Weathermap Config Editor")
+    parser.add_argument(
+        "--config", "-c",
+        default="config.ini",
+        help="Path to config file (default: config.ini)"
+    )
+    args = parser.parse_args()
+
     root = tk.Tk()
-    editor = ConfigEditor(root)
+    editor = ConfigEditor(root, config_file=args.config)
     editor.mainloop()
 
 

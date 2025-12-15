@@ -20,6 +20,7 @@ ENV/
 
 # Project specific
 config.ini
+*config.ini
 network_map.png
 *.png
 !example_map.png
