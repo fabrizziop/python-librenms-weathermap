@@ -47,36 +47,54 @@ class ConfigEditor:
         self.insecure_var = tk.BooleanVar(value=False)  # type: ignore
         self.load_config()
 
+        # Create menu bar
+        menubar = tk.Menu(root)  # type: ignore
+        root.config(menu=menubar)  # type: ignore
+
+        # File menu
+        file_menu = tk.Menu(menubar, tearoff=0)  # type: ignore
+        menubar.add_cascade(label="File", menu=file_menu)  # type: ignore
+        file_menu.add_command(label="Load Config", command=self.load_config)  # type: ignore
+        file_menu.add_command(label="Save Config", command=self.save_config)  # type: ignore
+        file_menu.add_separator()  # type: ignore
+        file_menu.add_command(label="Settings...", command=self.open_settings)  # type: ignore
+        file_menu.add_separator()  # type: ignore
+        file_menu.add_command(label="Exit", command=root.quit)  # type: ignore
+
+        # Edit menu
+        edit_menu = tk.Menu(menubar, tearoff=0)  # type: ignore
+        menubar.add_cascade(label="Edit", menu=edit_menu)  # type: ignore
+        edit_menu.add_command(label="Add Device", command=self.add_device)  # type: ignore
+        edit_menu.add_command(label="Add Cloud Node", command=self.add_cloud_node)  # type: ignore
+        edit_menu.add_command(label="Add Pseudo Node", command=self.add_pseudo_node)  # type: ignore
+        edit_menu.add_separator()  # type: ignore
+        edit_menu.add_command(label="Add Link", command=self.add_link)  # type: ignore
+        edit_menu.add_command(label="Add Cloud Link", command=self.add_cloud_link)  # type: ignore
+        edit_menu.add_command(label="Add Pseudo Link", command=self.add_pseudo_link)  # type: ignore
+        edit_menu.add_separator()  # type: ignore
+        edit_menu.add_command(label="Remove Unlinked Devices", command=self.remove_unlinked_devices)  # type: ignore
+
+        # LibreNMS menu
+        librenms_menu = tk.Menu(menubar, tearoff=0)  # type: ignore
+        menubar.add_cascade(label="LibreNMS", menu=librenms_menu)  # type: ignore
+        librenms_menu.add_checkbutton(label="Insecure (Disable SSL)", variable=self.insecure_var)  # type: ignore
+        librenms_menu.add_separator()  # type: ignore
+        librenms_menu.add_command(label="Fetch Devices", command=self.fetch_devices)  # type: ignore
+        librenms_menu.add_command(label="Bulk Add (Devices + Links)", command=self.bulk_add)  # type: ignore
+        librenms_menu.add_command(label="Bulk Add Links Only", command=self.bulk_add_links)  # type: ignore
+
+        # View menu
+        view_menu = tk.Menu(menubar, tearoff=0)  # type: ignore
+        menubar.add_cascade(label="View", menu=view_menu)  # type: ignore
+        view_menu.add_command(label="Zoom In", command=self.zoom_in)  # type: ignore
+        view_menu.add_command(label="Zoom Out", command=self.zoom_out)  # type: ignore
+        view_menu.add_command(label="Reset Zoom", command=self.reset_zoom)  # type: ignore
+        view_menu.add_separator()  # type: ignore
+        view_menu.add_command(label="Refresh", command=self.draw_network)  # type: ignore
+
         # Canvas for drawing
         self.canvas = tk.Canvas(root, width=1200, height=800, bg="white")  # type: ignore
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)  # type: ignore
-
-        # Toolbar
-        toolbar = tk.Frame(root)  # type: ignore
-        toolbar.pack(side=tk.RIGHT, fill=tk.Y)  # type: ignore
-
-        tk.Checkbutton(toolbar, text="Insecure (Disable SSL)", variable=self.insecure_var).pack(
-            fill=tk.X, anchor=tk.W
-        )
-        tk.Button(toolbar, text="Fetch Devices", command=self.fetch_devices).pack(
-            fill=tk.X
-        )
-        tk.Button(toolbar, text="Add Device", command=self.add_device).pack(fill=tk.X)
-        tk.Button(toolbar, text="Add Cloud Node", command=self.add_cloud_node).pack(fill=tk.X)
-        tk.Button(toolbar, text="Add Pseudo Node", command=self.add_pseudo_node).pack(fill=tk.X)
-        tk.Button(toolbar, text="Add Link", command=self.add_link).pack(fill=tk.X)
-        tk.Button(toolbar, text="Add Cloud Link", command=self.add_cloud_link).pack(fill=tk.X)
-        tk.Button(toolbar, text="Add Pseudo Link", command=self.add_pseudo_link).pack(fill=tk.X)
-        tk.Button(toolbar, text="Bulk Add", command=self.bulk_add).pack(fill=tk.X)
-        tk.Button(toolbar, text="Bulk Add Links", command=self.bulk_add_links).pack(fill=tk.X)
-        tk.Button(
-            toolbar, text="Remove Unlinked", command=self.remove_unlinked_devices
-        ).pack(fill=tk.X)
-        tk.Button(toolbar, text="Zoom In", command=self.zoom_in).pack(fill=tk.X)
-        tk.Button(toolbar, text="Zoom Out", command=self.zoom_out).pack(fill=tk.X)
-        tk.Button(toolbar, text="Settings", command=self.open_settings).pack(fill=tk.X)
-        tk.Button(toolbar, text="Save", command=self.save_config).pack(fill=tk.X)
-        tk.Button(toolbar, text="Load", command=self.load_config).pack(fill=tk.X)
+        self.canvas.pack(fill=tk.BOTH, expand=True)  # type: ignore
 
         self.selected_device = None
         self.pan_start = None
@@ -1168,6 +1186,10 @@ class ConfigEditor:
         for device_key, data in self.devices.items():
             data["x"] = cx + (data["x"] - cx) / 1.2
             data["y"] = cy + (data["y"] - cy) / 1.2
+        self.draw_network()
+
+    def reset_zoom(self) -> None:
+        self.scale = 1.0
         self.draw_network()
 
     def open_settings(self) -> None:
