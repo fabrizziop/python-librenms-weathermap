@@ -50,6 +50,10 @@ fig_height = 12
 node_color = lightblue
 cloud_node_color = lightgray
 pseudo_node_color = lightyellow
+
+# Dead link detection (optional)
+show_dead_links = true
+dead_link_color = black
 ```
 
 Use `python main.py --config config.ini --output map.png --no-show` to run headless.

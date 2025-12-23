@@ -68,3 +68,9 @@ cloud_node_color = lightgray
 # Pseudo node color (for junction/aggregation points)
 # Examples: lightyellow, #FFFF99
 pseudo_node_color = lightyellow
+# Show dead links (mark links with zero inbound traffic at both ends)
+# Set to true to enable - links where neither end receives traffic are shown in dead_link_color
+show_dead_links = false
+# Dead link color (used when show_dead_links is true and both ends have zero inbound)
+# Examples: black, gray, #333333
+dead_link_color = black

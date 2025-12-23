@@ -87,6 +87,17 @@ def main():
         if config.has_section("settings")
         else "lightblue"
     )
+    # Dead link color (shown when link has zero inbound traffic)
+    show_dead_links = (
+        config["settings"].get("show_dead_links", "false").lower() == "true"
+        if config.has_section("settings")
+        else False
+    )
+    dead_link_color = (
+        config["settings"].get("dead_link_color", "black")
+        if config.has_section("settings")
+        else "black"
+    )
 
     # Map device keys to hostnames
     if config.has_section("devices"):
@@ -250,16 +261,22 @@ def main():
                         # Pseudo-to-pseudo: use aggregated traffic from both sides
                         out_rate1 = pseudo_traffic.get(hostname1, {}).get(port1_name, {}).get("out", 0.0)
                         out_rate2 = pseudo_traffic.get(hostname2, {}).get(port2_name, {}).get("out", 0.0)
+                        in_rate1 = pseudo_traffic.get(hostname1, {}).get(port1_name, {}).get("in", 0.0)
+                        in_rate2 = pseudo_traffic.get(hostname2, {}).get(port2_name, {}).get("in", 0.0)
                     elif is_pseudo1 and is_cloud2:
                         # Pseudo-to-cloud: use TOTAL aggregated traffic from pseudo-node
                         # pseudo "in" = traffic from managed devices going TO cloud
                         # pseudo "out" = traffic from cloud going TO managed devices
                         out_rate1 = get_pseudo_total_traffic(hostname1, "in")   # Pseudo->Cloud
                         out_rate2 = get_pseudo_total_traffic(hostname1, "out")  # Cloud->Pseudo
+                        in_rate1 = out_rate2  # Pseudo inbound = Cloud outbound
+                        in_rate2 = out_rate1  # Cloud inbound = Pseudo outbound
                     elif is_cloud1 and is_pseudo2:
                         # Cloud-to-pseudo: use TOTAL aggregated traffic from pseudo-node
                         out_rate1 = get_pseudo_total_traffic(hostname2, "out")  # Cloud->Pseudo
                         out_rate2 = get_pseudo_total_traffic(hostname2, "in")   # Pseudo->Cloud
+                        in_rate1 = out_rate2  # Cloud inbound = Pseudo outbound
+                        in_rate2 = out_rate1  # Pseudo inbound = Cloud outbound
                     else:
                         # Cloud-to-cloud: skip
                         print(f"Warning: Link {link_str} connects two cloud nodes - skipping")
@@ -271,6 +288,8 @@ def main():
                         # pseudo "in" = traffic going TO cloud, pseudo "out" = traffic FROM cloud
                         out_rate1 = get_pseudo_total_traffic(hostname2, "out")  # Cloud->Pseudo
                         out_rate2 = get_pseudo_total_traffic(hostname2, "in")   # Pseudo->Cloud
+                        in_rate1 = out_rate2
+                        in_rate2 = out_rate1
                     else:
                         port2_key = f"{hostname2}:{port2_name}"
                         if port2_key not in ports:
@@ -279,6 +298,8 @@ def main():
                         port2 = ports[port2_key]
                         out_rate1 = get_rate(port2, "In")   # Cloud outbound = managed In
                         out_rate2 = get_rate(port2, "Out")  # Managed outbound
+                        in_rate1 = out_rate2  # Cloud inbound = managed outbound
+                        in_rate2 = get_rate(port2, "In")  # Managed inbound
                 elif is_cloud2:
                     # Node 2 is cloud, derive from node 1's interface
                     if is_pseudo1:
@@ -286,6 +307,8 @@ def main():
                         # pseudo "in" = traffic going TO cloud, pseudo "out" = traffic FROM cloud
                         out_rate1 = get_pseudo_total_traffic(hostname1, "in")   # Pseudo->Cloud
                         out_rate2 = get_pseudo_total_traffic(hostname1, "out")  # Cloud->Pseudo
+                        in_rate1 = out_rate2
+                        in_rate2 = out_rate1
                     else:
                         port1_key = f"{hostname1}:{port1_name}"
                         if port1_key not in ports:
@@ -294,6 +317,8 @@ def main():
                         port1 = ports[port1_key]
                         out_rate1 = get_rate(port1, "Out")  # Managed outbound
                         out_rate2 = get_rate(port1, "In")   # Cloud outbound = managed In
+                        in_rate1 = get_rate(port1, "In")  # Managed inbound
+                        in_rate2 = out_rate1  # Cloud inbound = managed outbound
                 elif is_pseudo1:
                     # Node 1 is pseudo, node 2 is managed
                     port2_key = f"{hostname2}:{port2_name}"
@@ -305,6 +330,8 @@ def main():
                     # Managed outbound = traffic going into pseudo
                     out_rate1 = get_rate(port2, "In")   # Pseudo outbound = managed In
                     out_rate2 = get_rate(port2, "Out")  # Managed outbound
+                    in_rate1 = out_rate2  # Pseudo inbound = managed outbound
+                    in_rate2 = get_rate(port2, "In")  # Managed inbound
                 elif is_pseudo2:
                     # Node 2 is pseudo, node 1 is managed
                     port1_key = f"{hostname1}:{port1_name}"
@@ -316,6 +343,8 @@ def main():
                     # Pseudo outbound to this device = managed inbound
                     out_rate1 = get_rate(port1, "Out")  # Managed outbound
                     out_rate2 = get_rate(port1, "In")   # Pseudo outbound = managed In
+                    in_rate1 = get_rate(port1, "In")  # Managed inbound
+                    in_rate2 = out_rate1  # Pseudo inbound = managed outbound
                 else:
                     # Normal link between two managed devices
                     port1_key = f"{hostname1}:{port1_name}"
@@ -330,14 +359,18 @@ def main():
                     port2 = ports[port2_key]
                     out_rate1 = get_rate(port1, "Out")
                     out_rate2 = get_rate(port2, "Out")
+                    in_rate1 = get_rate(port1, "In")
+                    in_rate2 = get_rate(port2, "In")
 
-                # Store outbound utilization from each node
+                # Store outbound and inbound utilization from each node
                 links.append(
                     {
                         "u": hostname1,
                         "v": hostname2,
                         "out_util1": out_rate1,  # Outbound from node 1
                         "out_util2": out_rate2,  # Outbound from node 2
+                        "in_util1": in_rate1,    # Inbound to node 1
+                        "in_util2": in_rate2,    # Inbound to node 2
                         "port1": port1_name,
                         "port2": port2_name,
                     }
@@ -465,8 +498,18 @@ def main():
                 midpoint = midpoint + curve_offset  # type: ignore
 
         # Get colors for each half
-        color1 = cmap(norm(out_util1))  # type: ignore  # Color from u to midpoint
-        color2 = cmap(norm(out_util2))  # type: ignore  # Color from v to midpoint
+        # If show_dead_links is enabled and BOTH ends have zero inbound traffic,
+        # mark the entire link as dead (black)
+        in_util1 = link.get("in_util1", out_util2)  # Inbound to u (fallback to out from v)
+        in_util2 = link.get("in_util2", out_util1)  # Inbound to v (fallback to out from u)
+        is_dead_link = show_dead_links and in_util1 == 0 and in_util2 == 0
+        
+        if is_dead_link:
+            color1 = dead_link_color
+            color2 = dead_link_color
+        else:
+            color1 = cmap(norm(out_util1))  # type: ignore  # Color from u to midpoint
+            color2 = cmap(norm(out_util2))  # type: ignore  # Color from v to midpoint
 
         # Draw first half (u to midpoint)
         ax.plot(  # type: ignore
